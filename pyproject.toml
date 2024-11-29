@@ -66,26 +66,26 @@ namespaces = false
 
 [project]
 name = "seqlike2"
-version = "0.0.1"
+version = "1.0.0"
 # NOTE: move dependencies into this section if you need to distribute the project as a Python package.
-requires-python = ">=3.10"
+requires-python = "<=3.12"
 dependencies = [
     "matplotlib",
     "pandas",
-    "scikit-learn",
     "numpy",
+    "xarray",
     "pyprojroot",
     "scipy",
-    "pymc",
-    "seaborn",
     "python-dotenv",
     "typer",
     "jax",
+    "scikit-learn",
+    "biopython",
 ]
 readme = "README.md"
 
 [project.scripts]
-seqlike2 = "seqlike2.cli:app"
+# seqlike2 = "seqlike2.cli:app"
 
 
 [tool.coverage.run]
