@@ -79,7 +79,6 @@ dependencies = [
     "python-dotenv",
     "typer",
     "jax",
-    "scikit-learn",
     "biopython",
 ]
 readme = "README.md"
@@ -114,6 +113,7 @@ hypothesis = "*"
 mkdocs = "*"
 mkdocs-material = "*"
 mknotebooks = "*"
+scikit-learn = "*"
 
 [tool.pixi.feature.notebook.dependencies]
 ipykernel = "*"

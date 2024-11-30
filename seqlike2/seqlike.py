@@ -3,13 +3,16 @@
 from enum import Enum
 from typing import Any, Dict, Iterable, Optional
 
+import jax.numpy as jnp
 import numpy as np
 import pandas as pd
 import xarray as xr
 from Bio.Seq import Seq
+from jax import random, vmap
 
 from .alphabets import AA
 from .encoders import OneHotEncoder, OrdinalEncoder
+from .utils.orf import find_longest_orf
 
 
 class SeqType(Enum):
@@ -50,7 +53,7 @@ class SeqLike:
         self._seq_type = seq_type
 
         # Create the xarray dataset
-        self.ds = xr.Dataset(
+        self.live_dataset = xr.Dataset(
             data_vars={
                 "sequence": ("position", list(sequence)),
                 "alphabet": ("alphabet_position", list(alphabet)),
@@ -67,11 +70,33 @@ class SeqLike:
 
         # Create index encoding
         index_encoded = self._index_encoder.transform(sequence)
-        self.ds["index_encoding"] = ("position", index_encoded)
+        self.live_dataset["index_encoding"] = ("position", index_encoded)
 
         # Create onehot encoding
         onehot_encoded = self._onehot_encoder.transform(sequence)
-        self.ds["onehot_encoding"] = (("position", "alphabet_position"), onehot_encoded)
+        self.live_dataset["onehot_encoding"] = (
+            ("position", "alphabet_position"),
+            onehot_encoded,
+        )
+
+        self.live_dataset["longest_orf"] = (
+            "position",
+            np.zeros(len(sequence), dtype=bool),
+        )
+        # If this is a nucleotide sequence, try to find and annotate the longest ORF
+        if self._seq_type == SeqType.NT:
+            orf_coords = find_longest_orf(sequence)
+            if orf_coords is not None:
+                start, end = orf_coords
+                # Create boolean array marking ORF positions
+                in_orf = np.zeros(len(sequence), dtype=bool)
+                in_orf[start:end] = True
+                self.live_dataset["longest_orf"] = ("position", in_orf)
+
+        if seq_type == SeqType.AA:
+            self.aa_dataset = self.live_dataset
+        else:
+            self.nt_dataset = self.live_dataset
 
     def sel(self, *args, **kwargs) -> "SeqLike":
         """Select positions from the sequence based on criteria.
@@ -84,19 +109,22 @@ class SeqLike:
         :returns: A new SeqLike object containing only the selected positions
         """
         drop = kwargs.pop("drop", True)
-        positions = self.ds.position.where(*args, **kwargs, drop=drop)
-        selected_ds = self.ds.sel(position=positions)
+        positions = self.live_dataset.position.where(*args, **kwargs, drop=drop)
+        selected_ds = self.live_dataset.sel(position=positions)
 
         # Create new SeqLike instance
         new_seqlike = SeqLike(
             sequence="".join(selected_ds.sequence.values),
-            alphabet=self.ds.alphabet.values,
+            alphabet=self.live_dataset.alphabet.values,
             seq_type=self._seq_type,
         )
 
         # Copy over any additional data variables
         for var in selected_ds.data_vars:
-            new_seqlike.ds[var] = (selected_ds[var].dims, selected_ds[var].values)
+            new_seqlike.live_dataset[var] = (
+                selected_ds[var].dims,
+                selected_ds[var].values,
+            )
 
         return new_seqlike
 
@@ -112,8 +140,18 @@ class SeqLike:
         """
         for k, v in kwargs.items():
             # Coerce to numpy array
-            v = np.array(v, dtype=type(v[0]))
-            self.ds[k] = ("position", v)
+            if not isinstance(v, np.ndarray):
+                v = np.array(v, dtype=type(v[0]))
+            # Check that annotation is not a reserved attribute
+            if k in RESERVED_ATTRS:
+                raise ValueError(
+                    f"Attribute {k} is reserved! Please use a different name."
+                )
+            if len(v) != len(self.live_dataset.position):
+                raise ValueError(
+                    f"Annotation {k} must be the same length as the sequence!"
+                )
+            self.live_dataset[k] = ("position", v)
         return self
 
     @property
@@ -125,43 +163,55 @@ class SeqLike:
         """
         return {
             k: v
-            for k, v in self.ds.data_vars.items()
+            for k, v in self.live_dataset.data_vars.items()
             if k not in ["sequence", "alphabet", "onehot_encoding", "index_encoding"]
         }
 
     def aa(self) -> "SeqLike":
-        """Convert nucleotide sequence to amino acid sequence.
+        """Swap representations from the nucleotide to the amino acid domain.
 
-        This method translates the nucleotide sequence to amino acids and
-        appropriately transforms all annotation tracks. Annotations are
-        aggregated over codons according to their data type:
+        This imply switches self.live_dataset to self.aa_dataset.
+        Will error out if self.aa_dataset is not initialized
+        and instead suggest running .translate() first.
+        """
+        self._seq_type = SeqType.AA
+        self.live_dataset = self.aa_dataset
+        return self
 
-        1. Boolean annotations: Take the OR over each codon
-        2. Numeric annotations: Take the mean over each codon
-        3. Categorical/string annotations: Take the mode over each codon
+    def nt(self) -> "SeqLike":
+        """Swap representations from the amino acid to the nucleotide domain.
+
+        This imply switches self.live_dataset to self.nt_dataset.
+        Will error out if self.nt_dataset is not initialized
+        and instead suggest running .translate() first.
+        """
+        self._seq_type = SeqType.NT
+        self.live_dataset = self.nt_dataset
+        return self
+
+    def translate(self) -> "SeqLike":
+        """Translate the nucleotide sequence into an amino acid sequence.
 
         :returns: A new SeqLike object containing the amino acid sequence
-        :raises ValueError: If the sequence is not a nucleotide sequence
         """
-        # Only works if the sequence is of type NT
         if self._seq_type != SeqType.NT:
             raise ValueError("This method only works for nucleotide sequences!")
 
         # Translate sequence into amino acids
         sequence = str(Seq("".join(i for i in self.sequence.values)).translate())
-        new_seqlike = SeqLike(sequence, alphabet=AA, seq_type=SeqType.AA)
+        aa_seqlike = SeqLike(sequence, alphabet=AA, seq_type=SeqType.AA)
 
         # Copy over all annotation tracks but coarsen them to triplets
-        for k, v in self.ds.data_vars.items():
+        for k, v in self.nt_dataset.data_vars.items():
             if k not in RESERVED_ATTRS and v.dims == ("position",):
                 # for booleans, take the OR over each codon
                 if v.dtype == bool:
-                    new_seqlike.ds[k] = (
+                    aa_seqlike.aa_dataset[k] = (
                         "position",
                         v.coarsen({"position": 3}).any().values,
                     )
                 elif v.dtype.kind in ["i", "f"]:  # integer or float
-                    new_seqlike.ds[k] = (
+                    aa_seqlike.aa_dataset[k] = (
                         "position",
                         v.coarsen({"position": 3}).mean().values,
                     )
@@ -180,8 +230,65 @@ class SeqLike:
                             counts = pd.Series(triplet).value_counts()
                             mode_val = counts.index[0]
                         new_values.append(mode_val)
-                    new_seqlike.ds[k] = ("position", np.array(new_values))
-        return new_seqlike
+                    aa_seqlike.aa_dataset[k] = ("position", np.array(new_values))
+        aa_seqlike.nt_dataset = self.nt_dataset
+        return aa_seqlike
+
+    def back_translate(
+        self, codon_matrix: Optional[jnp.ndarray] = None, random_seed: int = 42
+    ) -> "SeqLike":
+        """Back translate the amino acid sequence into a nucleotide sequence.
+
+        Uses JAX for efficient sampling from codon probabilities.
+        If no codon matrix is provided, uses uniform probabilities
+        for synonymous codons.
+
+        :param codon_matrix: Optional codon probability matrix.
+            Shape should be (len(AA), 64).
+            If None, uses uniform probabilities.
+        :returns: A new SeqLike object containing the nucleotide sequence
+        :raises ValueError: If sequence is not amino acid type
+        """
+        if self._seq_type != SeqType.AA:
+            raise ValueError("Can only back-translate amino acid sequences!")
+
+        # Import here to avoid circular imports
+        from .utils.codons import CODONS, create_uniform_codon_matrix
+
+        # Use uniform matrix if none provided
+        if codon_matrix is None:
+            codon_matrix = create_uniform_codon_matrix()
+
+        # Get per-position codon probabilities based on amino acid indices
+        aa_indices = self.index_encoding.values
+        pos_codon_probs = codon_matrix[aa_indices]
+
+        # Create a random key for each position
+        key = random.PRNGKey(random_seed)
+        keys = random.split(key, len(aa_indices))
+
+        # Sample codons for each position
+        sample_codons = vmap(lambda k, p: random.categorical(k, jnp.log(p)))
+        codon_indices = sample_codons(keys, pos_codon_probs)
+
+        # Convert codon indices to sequence
+        nt_sequence = "".join(CODONS[idx] for idx in codon_indices)
+
+        # Create new SeqLike object
+        from .alphabets import NT
+
+        nt_seqlike = SeqLike(nt_sequence, alphabet=NT, seq_type=SeqType.NT)
+
+        # Copy over relevant annotations, expanding each position to 3 nucleotides
+        for k, v in self.live_dataset.data_vars.items():
+            if k not in RESERVED_ATTRS and v.dims == ("position",):
+                expanded = np.repeat(v.values, 3)
+                nt_seqlike.live_dataset[k] = ("position", expanded)
+
+        # Store both representations
+        nt_seqlike.aa_dataset = self.live_dataset
+
+        return nt_seqlike
 
     def __str__(self) -> str:
         """Get string representation of the sequence.
@@ -197,6 +304,6 @@ class SeqLike:
         :returns: The requested attribute
         :raises AttributeError: If the attribute doesn't exist
         """
-        if hasattr(self.ds, name):
-            return getattr(self.ds, name)
+        if hasattr(self.live_dataset, name):
+            return getattr(self.live_dataset, name)
         raise AttributeError(f"'SeqLike' object has no attribute '{name}'")
