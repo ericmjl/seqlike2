@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 from Bio.Seq import Seq
+from Bio.SeqRecord import SeqRecord
 from jax import random, vmap
 
 from .alphabets import AA, TRANSLATABLE_AA
@@ -45,9 +46,10 @@ class SeqLike:
 
     def __init__(
         self,
-        sequence: str,
+        sequence: Seq | SeqRecord | str,
         alphabet: Optional[Iterable] = None,
         seq_type: SeqType = SeqType.NT,
+        id: Optional[str] = None,
     ):
         # Create xarray dataset with sequence data and alphabet
         self._seq_type = seq_type
@@ -97,6 +99,8 @@ class SeqLike:
             self.aa_dataset = self.live_dataset
         else:
             self.nt_dataset = self.live_dataset
+
+        self.id = id
 
     def select(self, *args, **kwargs) -> "SeqLike":
         """Select positions from the sequence based on criteria.
@@ -387,3 +391,13 @@ class SeqLike:
                 new_seqlike.aa_dataset = selected_ds
 
         return new_seqlike
+
+    @property
+    def seq(self) -> Seq:
+        """Get BioPython Seq representation of the sequence."""
+        return Seq(str(self))
+
+    @property
+    def seqrecord(self) -> SeqRecord:
+        """Get BioPython SeqRecord representation of the sequence."""
+        return SeqRecord(id=self.id, seq=self.seq)
