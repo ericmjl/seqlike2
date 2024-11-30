@@ -155,17 +155,32 @@ def test_back_translation(
 
 def test_domain_switching(nt_seqlike: SeqLike, aa_seqlike: SeqLike):
     """Test switching between nucleotide and amino acid domains."""
-    # Translate to amino acid
+    # Original test cases
     aa_seq = nt_seqlike.translate()
-
-    # Switch back to nucleotide
     nt_seq = aa_seq.nt()
     assert nt_seq._seq_type == SeqType.NT
     assert str(nt_seq) == str(nt_seqlike)
-
-    # Switch to amino acid
     aa_seq = nt_seq.aa()
     assert aa_seq._seq_type == SeqType.AA
+
+    # Additional test cases from the second implementation
+    # Create a nucleotide sequence that's translatable
+    nt_seq = SeqLike("ATGGCCTAA", alphabet=NT)
+
+    # Translate to amino acid
+    aa_seq = nt_seq.translate()
+
+    # Test domain switching
+    assert aa_seq._seq_type == SeqType.AA
+    aa_seq.nt()  # Switch to NT domain
+    assert aa_seq._seq_type == SeqType.NT
+    aa_seq.aa()  # Switch back to AA domain
+    assert aa_seq._seq_type == SeqType.AA
+
+    # Test error when trying to switch to non-existent domain
+    nt_only = SeqLike("ATGGCCTAA", alphabet=NT)
+    with pytest.raises(AttributeError):
+        nt_only.aa()  # Should fail because aa_dataset doesn't exist yet
 
 
 def test_longest_orf_annotation(nt_seqlike: SeqLike):
@@ -232,3 +247,96 @@ def test_sequence_slicing(nt_seqlike: SeqLike):
     sliced = nt_seqlike[0:3]
     assert "is_gc" in sliced.annotations
     assert len(sliced.is_gc) == 3
+
+
+def test_annotation_preservation():
+    """Test preservation of annotations during translation/back-translation."""
+    # Create sequence with annotations
+    nt_seq = SeqLike("ATGGCCTAA", alphabet=NT)
+    nt_seq.annotate(
+        is_start=np.array(
+            [True, False, False, False, False, False, False, False, False]
+        ),
+        quality=np.array([0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1]),
+        category=np.array(["A", "B", "C", "A", "B", "C", "A", "B", "C"]),
+    )
+
+    # Translate and check annotation preservation
+    aa_seq = nt_seq.translate()
+
+    # Check boolean annotation (should use OR for codons)
+    assert aa_seq.aa_dataset.is_start.values[0]
+    assert all(~aa_seq.aa_dataset.is_start.values[1:])
+
+    # Check numeric annotation (should use mean for codons)
+    np.testing.assert_almost_equal(
+        aa_seq.aa_dataset.quality.values[0], (0.9 + 0.8 + 0.7) / 3
+    )
+
+    # Check categorical annotation (should use mode for codons)
+    assert aa_seq.aa_dataset.category.values[0] in ["A", "B", "C"]
+
+
+def test_slicing_with_domains():
+    """Test slicing behavior with domain preservation."""
+    # Create a sequence with both domains
+    nt_seq = SeqLike("ATGGCCTAA", alphabet=NT, seq_type=SeqType.NT)
+    aa_seq = nt_seq.translate()
+
+    # Test valid codon-preserving slice in NT domain
+    valid_slice = aa_seq.nt()[0:6]  # Slice 2 complete codons
+    assert len(valid_slice.sequence) == 6
+
+    # Test invalid codon-breaking slice
+    with pytest.raises(ValueError):
+        _ = aa_seq.nt()[0:7]  # This breaks a codon
+
+    # Test AA domain slicing
+    aa_slice = aa_seq[0:2]
+    assert len(aa_slice.sequence) == 2
+    assert len(aa_slice.nt_dataset.sequence) == 6  # Should have 6 NT positions
+
+
+def test_back_translation_validation():
+    """Test back-translation input validation and error handling."""
+    # Test with invalid amino acids
+    invalid_aa = SeqLike("ABZX", alphabet=AA, seq_type=SeqType.AA)
+    with pytest.raises(ValueError, match="invalid amino acids"):
+        invalid_aa.back_translate()
+
+    # Test with non-AA sequence
+    nt_seq = SeqLike("ATGGCC", alphabet=NT)
+    with pytest.raises(ValueError, match="Can only back-translate"):
+        nt_seq.back_translate()
+
+
+def test_annotation_validation():
+    """Test annotation validation."""
+    seq = SeqLike("ATGGCC", alphabet=NT)
+
+    # Test invalid annotation length
+    with pytest.raises(ValueError, match="must be the same length"):
+        seq.annotate(test=[1, 2, 3])  # Wrong length
+
+    # Test reserved attribute names
+    with pytest.raises(ValueError, match="reserved"):
+        seq.annotate(sequence=[1, 2, 3, 4, 5, 6])
+
+
+def test_select_method():
+    """Test the select method with various conditions."""
+    seq = SeqLike("ATGGCC", alphabet=NT)
+    seq.annotate(
+        quality=np.array([0.9, 0.8, 0.7, 0.6, 0.5, 0.4]),
+        is_start=np.array([True, False, False, False, False, False]),
+    )
+
+    # Select high quality positions
+    high_qual = seq.select(seq.quality > 0.7)
+    assert len(high_qual.sequence) == 3
+    assert high_qual.quality.values.tolist() == [0.9, 0.8, 0.7]
+
+    # Select with multiple conditions
+    selected = seq.select((seq.quality > 0.7) & seq.is_start)
+    assert len(selected.sequence) == 1
+    assert selected.sequence.values[0] == "A"

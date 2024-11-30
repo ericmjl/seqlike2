@@ -1,5 +1,6 @@
 """SeqLike class for working with biological sequences."""
 
+import copy
 from enum import Enum
 from typing import Any, Dict, Iterable, Optional
 
@@ -178,9 +179,10 @@ class SeqLike:
         Will error out if self.aa_dataset is not initialized
         and instead suggest running .translate() first.
         """
-        self._seq_type = SeqType.AA
-        self.live_dataset = self.aa_dataset
-        return self
+        new_seqlike = copy.deepcopy(self)
+        new_seqlike._seq_type = SeqType.AA
+        new_seqlike.live_dataset = new_seqlike.aa_dataset
+        return new_seqlike
 
     def nt(self) -> "SeqLike":
         """Swap representations from the amino acid to the nucleotide domain.
@@ -189,9 +191,10 @@ class SeqLike:
         Will error out if self.nt_dataset is not initialized
         and instead suggest running .translate() first.
         """
-        self._seq_type = SeqType.NT
-        self.live_dataset = self.nt_dataset
-        return self
+        new_seqlike = copy.deepcopy(self)
+        new_seqlike._seq_type = SeqType.NT
+        new_seqlike.live_dataset = new_seqlike.nt_dataset
+        return new_seqlike
 
     def translate(self) -> "SeqLike":
         """Translate the nucleotide sequence into an amino acid sequence.
@@ -200,6 +203,10 @@ class SeqLike:
         """
         if self._seq_type != SeqType.NT:
             raise ValueError("This method only works for nucleotide sequences!")
+
+        # Check if sequence length is divisible by 3
+        if len(self.sequence) % 3 != 0:
+            raise ValueError("Sequence length must be a multiple of 3 for translation!")
 
         # Translate sequence into amino acids
         sequence = str(Seq("".join(i for i in self.sequence.values)).translate())
@@ -308,15 +315,45 @@ class SeqLike:
         return "".join(i for i in self.sequence.values)
 
     def __getattr__(self, name) -> Any:
-        """Delegate attribute access to the underlying xarray Dataset.
+        """Attribute access delegation.
+
+        We first check if the attribute exists on the underlying xarray Dataset,
+        and if so, we delegate to it. Otherwise, we check the SeqLike object.
 
         :param name: Name of the attribute to access
         :returns: The requested attribute
         :raises AttributeError: If the attribute doesn't exist
         """
-        if hasattr(self.live_dataset, name):
+        # Protect against recursion for special attributes
+        if name.startswith("_"):
+            raise AttributeError(
+                f"'{self.__class__.__name__}' has no attribute '{name}'"
+            )
+
+        # Only delegate to live_dataset if it exists
+        if hasattr(self, "live_dataset") and hasattr(self.live_dataset, name):
             return getattr(self.live_dataset, name)
-        raise AttributeError(f"'SeqLike' object has no attribute '{name}'")
+        raise AttributeError(f"'{self.__class__.__name__}' has no attribute '{name}'")
+
+    def __setattr__(self, name, value):
+        """Attribute setting delegation.
+
+        We first check if the attribute exists on the underlying xarray Dataset,
+        and if so, we delegate to it. Otherwise, we set it on the SeqLike object.
+
+        :param name: Name of the attribute to set
+        :param value: Value to set the attribute to
+        """
+        # Always allow setting protected attributes directly
+        if name.startswith("_") or name == "live_dataset":
+            super().__setattr__(name, value)
+            return
+
+        # Only delegate to live_dataset if it exists
+        if hasattr(self, "live_dataset") and hasattr(self.live_dataset, name):
+            setattr(self.live_dataset, name, value)
+        else:
+            super().__setattr__(name, value)
 
     def __getitem__(self, key) -> "SeqLike":
         """Enable sequence slicing using standard Python slice notation.
@@ -368,27 +405,28 @@ class SeqLike:
                     selected_ds[var].values,
                 )
 
-        # Properly handle domain datasets
-        if hasattr(self, "aa_dataset"):
-            if self._seq_type == SeqType.AA:
-                # If we're in AA domain, slice aa_dataset and copy nt_dataset
-                new_seqlike.aa_dataset = selected_ds
-                new_seqlike.nt_dataset = self.nt_dataset
-            else:
-                # If we're in NT domain, copy aa_dataset and slice nt_dataset
-                new_seqlike.aa_dataset = self.aa_dataset
-                new_seqlike.nt_dataset = selected_ds
+        # Handle domain datasets
+        # The live_dataset is already sliced correctly above
+        if hasattr(self, "aa_dataset") and self._seq_type == SeqType.NT:
+            # We're in NT domain, need to slice AA dataset
+            # Check if we can cleanly slice into codons
+            if len(positions) % 3 != 0:
+                raise ValueError(
+                    "Cannot slice NT sequence in a way that preserves complete codons!"
+                )
+            # Get corresponding AA positions (every 3rd NT position)
+            aa_positions = positions[::3] // 3
+            new_seqlike.aa_dataset = self.aa_dataset.sel(position=aa_positions)
+            new_seqlike.nt_dataset = selected_ds
 
-        if hasattr(self, "nt_dataset"):
-            if self._seq_type == SeqType.NT:
-                # If we're in NT domain, slice nt_dataset and copy aa_dataset
-                new_seqlike.nt_dataset = selected_ds
-                if hasattr(self, "aa_dataset"):
-                    new_seqlike.aa_dataset = self.aa_dataset
-            else:
-                # If we're in AA domain, copy nt_dataset and slice aa_dataset
-                new_seqlike.nt_dataset = self.nt_dataset
-                new_seqlike.aa_dataset = selected_ds
+        elif hasattr(self, "nt_dataset") and self._seq_type == SeqType.AA:
+            # We're in AA domain, need to slice NT dataset
+            # Each AA position corresponds to 3 NT positions
+            nt_positions = np.concatenate(
+                [np.arange(p * 3, (p + 1) * 3) for p in positions]
+            )
+            new_seqlike.nt_dataset = self.nt_dataset.sel(position=nt_positions)
+            new_seqlike.aa_dataset = selected_ds
 
         return new_seqlike
 
