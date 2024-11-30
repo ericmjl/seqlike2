@@ -6532,7 +6532,7 @@ packages:
   name: seqlike2
   version: 1.0.0
   path: .
-  sha256: 978efe348e23d9deac8da183dd0d32dd0c723b1752050c4b47790b20e02b30fc
+  sha256: c869f177d14eff96458bf498f55c470c5967094b0d5731fad14f6247aa9e0125
   requires_dist:
   - matplotlib
   - pandas

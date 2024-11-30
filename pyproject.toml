@@ -52,7 +52,7 @@ testpaths = [
 [tool.isort]
 profile = "black"
 
-[tool.ruff]
+[tool.ruff.lint]
 # See https://docs.astral.sh/ruff/rules/ for a list of rules.
 # See https://docs.astral.sh/ruff/configuration/#using-pyprojecttoml for configuration documentation
 select = ["E", "F", "I"]
