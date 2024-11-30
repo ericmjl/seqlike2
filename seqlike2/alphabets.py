@@ -31,7 +31,8 @@ every_letter_alphabet = string.ascii_uppercase
 
 STANDARD_NT = gap_letter + "ACGTU" + generic_nt_letter
 NT = STANDARD_NT + "BDHKMRSVWY"
-STANDARD_AA = stop_letter + gap_letter + protein_letters + generic_protein_letter
+TRANSLATABLE_AA = stop_letter + protein_letters
+STANDARD_AA = TRANSLATABLE_AA + generic_protein_letter + gap_letter
 AA = STANDARD_AA + "BJOUZ"
 
 STANDARD_NT_SET = set(STANDARD_NT)

@@ -10,7 +10,7 @@ import xarray as xr
 from Bio.Seq import Seq
 from jax import random, vmap
 
-from .alphabets import AA
+from .alphabets import AA, TRANSLATABLE_AA
 from .encoders import OneHotEncoder, OrdinalEncoder
 from .utils.orf import find_longest_orf
 
@@ -98,7 +98,7 @@ class SeqLike:
         else:
             self.nt_dataset = self.live_dataset
 
-    def sel(self, *args, **kwargs) -> "SeqLike":
+    def select(self, *args, **kwargs) -> "SeqLike":
         """Select positions from the sequence based on criteria.
 
         This method allows filtering the sequence based on arbitrary criteria.
@@ -259,6 +259,12 @@ class SeqLike:
         if codon_matrix is None:
             codon_matrix = create_uniform_codon_matrix()
 
+        # Ensure that the sequence contains only valid amino acids.
+        if not set(self.sequence.values).issubset(TRANSLATABLE_AA):
+            raise ValueError(
+                "Sequence contains invalid amino acids for back-translation!"
+            )
+
         # Get per-position codon probabilities based on amino acid indices
         aa_indices = self.index_encoding.values
         pos_codon_probs = codon_matrix[aa_indices]
@@ -307,3 +313,77 @@ class SeqLike:
         if hasattr(self.live_dataset, name):
             return getattr(self.live_dataset, name)
         raise AttributeError(f"'SeqLike' object has no attribute '{name}'")
+
+    def __getitem__(self, key) -> "SeqLike":
+        """Enable sequence slicing using standard Python slice notation.
+
+        This method allows slicing the sequence using standard Python syntax,
+        e.g. seqlike[1:10] or seqlike[::2].
+
+        :param key: An integer, slice object, or boolean array
+        :returns: A new SeqLike object containing the selected positions
+        :raises IndexError: If index is out of bounds
+        :raises TypeError: If key is of invalid type
+        """
+        if isinstance(key, (slice, int, np.integer)):
+            # Handle integer indexing and slicing
+            positions = np.arange(len(self.sequence))[key]
+            # Convert scalar to array for single position selection
+            if isinstance(positions, (int, np.integer)):
+                positions = np.array([positions])
+            selected_ds = self.live_dataset.sel(position=positions)
+        elif isinstance(key, (list, np.ndarray)):
+            # Handle boolean masks and integer arrays
+            if isinstance(key, list):
+                key = np.array(key)
+            if key.dtype == bool:
+                if len(key) != len(self.sequence):
+                    raise ValueError("Boolean mask must be same length as sequence!")
+                positions = np.arange(len(self.sequence))[key]
+            else:
+                positions = key
+            selected_ds = self.live_dataset.sel(position=positions)
+        else:
+            raise TypeError(
+                f"Invalid key type: {type(key)}. Must be int, slice, "
+                "list, or numpy array."
+            )
+
+        # Create new SeqLike instance
+        new_seqlike = SeqLike(
+            sequence="".join(selected_ds.sequence.values),
+            alphabet=self.live_dataset.alphabet.values,
+            seq_type=self._seq_type,
+        )
+
+        # Copy over any additional data variables
+        for var in selected_ds.data_vars:
+            if var not in ["sequence", "alphabet"]:
+                new_seqlike.live_dataset[var] = (
+                    selected_ds[var].dims,
+                    selected_ds[var].values,
+                )
+
+        # Properly handle domain datasets
+        if hasattr(self, "aa_dataset"):
+            if self._seq_type == SeqType.AA:
+                # If we're in AA domain, slice aa_dataset and copy nt_dataset
+                new_seqlike.aa_dataset = selected_ds
+                new_seqlike.nt_dataset = self.nt_dataset
+            else:
+                # If we're in NT domain, copy aa_dataset and slice nt_dataset
+                new_seqlike.aa_dataset = self.aa_dataset
+                new_seqlike.nt_dataset = selected_ds
+
+        if hasattr(self, "nt_dataset"):
+            if self._seq_type == SeqType.NT:
+                # If we're in NT domain, slice nt_dataset and copy aa_dataset
+                new_seqlike.nt_dataset = selected_ds
+                if hasattr(self, "aa_dataset"):
+                    new_seqlike.aa_dataset = self.aa_dataset
+            else:
+                # If we're in AA domain, copy nt_dataset and slice aa_dataset
+                new_seqlike.nt_dataset = self.nt_dataset
+                new_seqlike.aa_dataset = selected_ds
+
+        return new_seqlike
