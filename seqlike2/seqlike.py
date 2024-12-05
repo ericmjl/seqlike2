@@ -2,7 +2,7 @@
 
 import copy
 from enum import Enum
-from typing import Any, Dict, Iterable, Optional
+from typing import Dict, Iterable, Optional
 
 import jax.numpy as jnp
 import numpy as np
@@ -13,7 +13,7 @@ from Bio.SeqRecord import SeqRecord
 from jax import random, vmap
 
 from .alphabets import AA, TRANSLATABLE_AA
-from .encoders import OneHotEncoder, OrdinalEncoder
+from .sequence_like import SequenceLike
 from .utils.orf import find_longest_orf
 
 
@@ -31,7 +31,7 @@ class SeqType(Enum):
 RESERVED_ATTRS = ["sequence", "alphabet", "onehot_encoding", "index_encoding"]
 
 
-class SeqLike:
+class SeqLike(SequenceLike):
     """A class for working with biological sequences.
 
     SeqLike provides a unified interface for working with biological sequences,
@@ -49,40 +49,15 @@ class SeqLike:
         self,
         sequence: Seq | SeqRecord | str,
         alphabet: Optional[Iterable] = None,
+        encoding: Optional[str] = None,
         seq_type: SeqType = SeqType.NT,
         id: Optional[str] = None,
     ):
+        super().__init__(sequence, alphabet, encoding=encoding)
         # Create xarray dataset with sequence data and alphabet
         self._seq_type = seq_type
 
-        # Create the xarray dataset
-        self.live_dataset = xr.Dataset(
-            data_vars={
-                "sequence": ("position", list(sequence)),
-                "alphabet": ("alphabet_position", list(alphabet)),
-            },
-            coords={
-                "position": np.arange(len(sequence)),
-                "alphabet_index": np.arange(len(alphabet)),
-            },
-        )
-
-        # Initialize encoders
-        self._index_encoder = OrdinalEncoder(categories=list(alphabet))
-        self._onehot_encoder = OneHotEncoder(categories=list(alphabet))
-
-        # Create index encoding
-        index_encoded = self._index_encoder.transform(sequence)
-        self.live_dataset["index_encoding"] = ("position", index_encoded)
-
-        # Create onehot encoding
-        onehot_encoded = self._onehot_encoder.transform(sequence)
-        self.live_dataset["onehot_encoding"] = (
-            ("position", "alphabet_position"),
-            onehot_encoded,
-        )
-
-        self.live_dataset["longest_orf"] = (
+        self.sequence_data["longest_orf"] = (
             "position",
             np.zeros(len(sequence), dtype=bool),
         )
@@ -94,12 +69,12 @@ class SeqLike:
                 # Create boolean array marking ORF positions
                 in_orf = np.zeros(len(sequence), dtype=bool)
                 in_orf[start:end] = True
-                self.live_dataset["longest_orf"] = ("position", in_orf)
+                self.sequence_data["longest_orf"] = ("position", in_orf)
 
         if seq_type == SeqType.AA:
-            self.aa_dataset = self.live_dataset
+            self.aa_dataset = self.sequence_data
         else:
-            self.nt_dataset = self.live_dataset
+            self.nt_dataset = self.sequence_data
 
         self.id = id
 
@@ -114,19 +89,19 @@ class SeqLike:
         :returns: A new SeqLike object containing only the selected positions
         """
         drop = kwargs.pop("drop", True)
-        positions = self.live_dataset.position.where(*args, **kwargs, drop=drop)
-        selected_ds = self.live_dataset.sel(position=positions)
+        positions = self.sequence_data.position.where(*args, **kwargs, drop=drop)
+        selected_ds = self.sequence_data.sel(position=positions)
 
         # Create new SeqLike instance
         new_seqlike = SeqLike(
             sequence="".join(selected_ds.sequence.values),
-            alphabet=self.live_dataset.alphabet.values,
+            alphabet=self.sequence_data.alphabet.values,
             seq_type=self._seq_type,
         )
 
         # Copy over any additional data variables
         for var in selected_ds.data_vars:
-            new_seqlike.live_dataset[var] = (
+            new_seqlike.sequence_data[var] = (
                 selected_ds[var].dims,
                 selected_ds[var].values,
             )
@@ -152,11 +127,11 @@ class SeqLike:
                 raise ValueError(
                     f"Attribute {k} is reserved! Please use a different name."
                 )
-            if len(v) != len(self.live_dataset.position):
+            if len(v) != len(self.sequence_data.position):
                 raise ValueError(
                     f"Annotation {k} must be the same length as the sequence!"
                 )
-            self.live_dataset[k] = ("position", v)
+            self.sequence_data[k] = ("position", v)
         return self
 
     @property
@@ -168,32 +143,32 @@ class SeqLike:
         """
         return {
             k: v
-            for k, v in self.live_dataset.data_vars.items()
+            for k, v in self.sequence_data.data_vars.items()
             if k not in ["sequence", "alphabet", "onehot_encoding", "index_encoding"]
         }
 
     def aa(self) -> "SeqLike":
         """Swap representations from the nucleotide to the amino acid domain.
 
-        This imply switches self.live_dataset to self.aa_dataset.
+        This imply switches self.sequence_data to self.aa_dataset.
         Will error out if self.aa_dataset is not initialized
         and instead suggest running .translate() first.
         """
         new_seqlike = copy.deepcopy(self)
         new_seqlike._seq_type = SeqType.AA
-        new_seqlike.live_dataset = new_seqlike.aa_dataset
+        new_seqlike.sequence_data = new_seqlike.aa_dataset
         return new_seqlike
 
     def nt(self) -> "SeqLike":
         """Swap representations from the amino acid to the nucleotide domain.
 
-        This imply switches self.live_dataset to self.nt_dataset.
+        This imply switches self.sequence_data to self.nt_dataset.
         Will error out if self.nt_dataset is not initialized
         and instead suggest running .translate() first.
         """
         new_seqlike = copy.deepcopy(self)
         new_seqlike._seq_type = SeqType.NT
-        new_seqlike.live_dataset = new_seqlike.nt_dataset
+        new_seqlike.sequence_data = new_seqlike.nt_dataset
         return new_seqlike
 
     def translate(self) -> "SeqLike":
@@ -297,63 +272,15 @@ class SeqLike:
         nt_seqlike = SeqLike(nt_sequence, alphabet=NT, seq_type=SeqType.NT)
 
         # Copy over relevant annotations, expanding each position to 3 nucleotides
-        for k, v in self.live_dataset.data_vars.items():
+        for k, v in self.sequence_data.data_vars.items():
             if k not in RESERVED_ATTRS and v.dims == ("position",):
                 expanded = np.repeat(v.values, 3)
-                nt_seqlike.live_dataset[k] = ("position", expanded)
+                nt_seqlike.sequence_data[k] = ("position_aa", expanded)
 
         # Store both representations
-        nt_seqlike.aa_dataset = self.live_dataset
+        nt_seqlike.aa_dataset = self.sequence_data
 
         return nt_seqlike
-
-    def __str__(self) -> str:
-        """Get string representation of the sequence.
-
-        :returns: The sequence as a string
-        """
-        return "".join(i for i in self.sequence.values)
-
-    def __getattr__(self, name) -> Any:
-        """Attribute access delegation.
-
-        We first check if the attribute exists on the underlying xarray Dataset,
-        and if so, we delegate to it. Otherwise, we check the SeqLike object.
-
-        :param name: Name of the attribute to access
-        :returns: The requested attribute
-        :raises AttributeError: If the attribute doesn't exist
-        """
-        # Protect against recursion for special attributes
-        if name.startswith("_"):
-            raise AttributeError(
-                f"'{self.__class__.__name__}' has no attribute '{name}'"
-            )
-
-        # Only delegate to live_dataset if it exists
-        if hasattr(self, "live_dataset") and hasattr(self.live_dataset, name):
-            return getattr(self.live_dataset, name)
-        raise AttributeError(f"'{self.__class__.__name__}' has no attribute '{name}'")
-
-    def __setattr__(self, name, value):
-        """Attribute setting delegation.
-
-        We first check if the attribute exists on the underlying xarray Dataset,
-        and if so, we delegate to it. Otherwise, we set it on the SeqLike object.
-
-        :param name: Name of the attribute to set
-        :param value: Value to set the attribute to
-        """
-        # Always allow setting protected attributes directly
-        if name.startswith("_") or name == "live_dataset":
-            super().__setattr__(name, value)
-            return
-
-        # Only delegate to live_dataset if it exists
-        if hasattr(self, "live_dataset") and hasattr(self.live_dataset, name):
-            setattr(self.live_dataset, name, value)
-        else:
-            super().__setattr__(name, value)
 
     def __getitem__(self, key) -> "SeqLike":
         """Enable sequence slicing using standard Python slice notation.
@@ -372,7 +299,7 @@ class SeqLike:
             # Convert scalar to array for single position selection
             if isinstance(positions, (int, np.integer)):
                 positions = np.array([positions])
-            selected_ds = self.live_dataset.sel(position=positions)
+            selected_ds = self.sequence_data.sel(position=positions)
         elif isinstance(key, (list, np.ndarray)):
             # Handle boolean masks and integer arrays
             if isinstance(key, list):
@@ -383,7 +310,7 @@ class SeqLike:
                 positions = np.arange(len(self.sequence))[key]
             else:
                 positions = key
-            selected_ds = self.live_dataset.sel(position=positions)
+            selected_ds = self.sequence_data.sel(position=positions)
         else:
             raise TypeError(
                 f"Invalid key type: {type(key)}. Must be int, slice, "
@@ -393,20 +320,20 @@ class SeqLike:
         # Create new SeqLike instance
         new_seqlike = SeqLike(
             sequence="".join(selected_ds.sequence.values),
-            alphabet=self.live_dataset.alphabet.values,
+            alphabet=self.sequence_data.alphabet.values,
             seq_type=self._seq_type,
         )
 
         # Copy over any additional data variables
         for var in selected_ds.data_vars:
             if var not in ["sequence", "alphabet"]:
-                new_seqlike.live_dataset[var] = (
+                new_seqlike.sequence_data[var] = (
                     selected_ds[var].dims,
                     selected_ds[var].values,
                 )
 
         # Handle domain datasets
-        # The live_dataset is already sliced correctly above
+        # The sequence_data is already sliced correctly above
         if hasattr(self, "aa_dataset") and self._seq_type == SeqType.NT:
             # We're in NT domain, need to slice AA dataset
             # Check if we can cleanly slice into codons

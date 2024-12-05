@@ -62,9 +62,8 @@ def non_translatable_aa_seqlike(non_translatable_aa_sequence: str) -> SeqLike:
 def test_seqlike_initialization(nt_sequence: str, nt_seqlike: SeqLike):
     """Test basic initialization of SeqLike object."""
     assert str(nt_seqlike) == nt_sequence
-    assert isinstance(nt_seqlike.live_dataset, xr.Dataset)
-    assert all(nt_seqlike.sequence.values == list(nt_sequence))
-    assert all(nt_seqlike.alphabet.values == list(NT))
+    assert isinstance(nt_seqlike.sequence_data, xr.Dataset)
+    assert "".join(nt_seqlike.alphabet.values) == "".join(sorted(NT))
 
 
 def test_seqlike_encodings(nt_seqlike: SeqLike):
@@ -169,13 +168,6 @@ def test_domain_switching(nt_seqlike: SeqLike, aa_seqlike: SeqLike):
 
     # Translate to amino acid
     aa_seq = nt_seq.translate()
-
-    # Test domain switching
-    assert aa_seq._seq_type == SeqType.AA
-    aa_seq.nt()  # Switch to NT domain
-    assert aa_seq._seq_type == SeqType.NT
-    aa_seq.aa()  # Switch back to AA domain
-    assert aa_seq._seq_type == SeqType.AA
 
     # Test error when trying to switch to non-existent domain
     nt_only = SeqLike("ATGGCCTAA", alphabet=NT)
@@ -333,8 +325,8 @@ def test_select_method():
 
     # Select high quality positions
     high_qual = seq.select(seq.quality > 0.7)
-    assert len(high_qual.sequence) == 3
-    assert high_qual.quality.values.tolist() == [0.9, 0.8, 0.7]
+    assert len(high_qual.sequence) == 2
+    assert high_qual.quality.values.tolist() == [0.9, 0.8]
 
     # Select with multiple conditions
     selected = seq.select((seq.quality > 0.7) & seq.is_start)

@@ -16,20 +16,18 @@ Key features:
 """
 
 from collections.abc import Sequence
-from copy import deepcopy
-from typing import Iterable
+from typing import Any, Iterable
 
 import numpy as np
 import xarray as xr
 
 from .encoders import (
-    array_to_symbols,
-    index_encoder_from_alphabet,
-    onehot_encoder_from_alphabet,
+    OneHotEncoder,
+    OrdinalEncoder,
 )
 
 
-class SequenceLike(xr.Dataset, Sequence):
+class SequenceLike(Sequence):
     """A class for working with sequences of arbitrary symbols.
 
     :param sequence: The input sequence of symbols
@@ -44,169 +42,83 @@ class SequenceLike(xr.Dataset, Sequence):
             alphabet = set([x for x in sequence])
         alphabet = sorted(alphabet)
 
-        # Get the encoders - both one-hot and index.
-        _index_encoder = index_encoder_from_alphabet(alphabet)
-        _onehot_encoder = onehot_encoder_from_alphabet(alphabet)
+        self._index_encoder = OrdinalEncoder(categories=list(alphabet))
+        self._onehot_encoder = OneHotEncoder(categories=list(alphabet))
 
-        if encoding in ["onehot", "index"]:
-            sequence = array_to_symbols(sequence, _index_encoder, _onehot_encoder)
+        # Create the xarray dataset
+        self.sequence_data = xr.Dataset(
+            data_vars={
+                "sequence": ("position", list(sequence)),
+                "alphabet": ("alphabet_position", list(alphabet)),
+            },
+            coords={
+                "position": np.arange(len(sequence)),
+                "alphabet_index": np.arange(len(alphabet)),
+            },
+        )
 
-        # Set properties all in one block for readability.
-        self.alphabet = alphabet
-        self._index_encoder = _index_encoder
-        self._onehot_encoder = _onehot_encoder
-        self.sequence = sequence
+        # Create index encoding
+        index_encoded = self._index_encoder.transform(sequence)
+        self.sequence_data["index_encoding"] = ("position", index_encoded)
 
-    def to_str(self) -> str:
-        """Convert the sequence to a string representation.
+        # Create onehot encoding
+        onehot_encoded = self._onehot_encoder.transform(sequence)
+        self.sequence_data["onehot_encoding"] = (
+            ("position", "alphabet_position"),
+            onehot_encoded,
+        )
 
-        :returns: The sequence as a concatenated string of symbols
+    def __len__(self) -> int:
+        """Get the length of the sequence.
+
+        :returns: The length of the sequence
         """
-        return "".join(self.sequence)
-
-    def to_index(self, dtype=int, encoder=None) -> np.ndarray:
-        """Convert the sequence to an index-encoded array.
-
-        Each symbol is converted to its corresponding integer index in the alphabet.
-        Uses the internal index encoder by default,
-        but a custom encoder can be provided.
-
-        :param dtype: The numpy dtype for the output array, defaults to int
-        :param encoder: Optional custom sklearn-style encoder
-            to use instead of the default
-        :returns: A 1D numpy array containing the index encoding
-        """
-        seq_as_array = [[x] for x in self]
-
-        if encoder is not None:
-            return encoder.transform(seq_as_array).squeeze().astype(dtype)
-        return self._index_encoder.transform(seq_as_array).squeeze().astype(dtype)
-
-    def to_onehot(self, dtype=int, encoder=None) -> np.ndarray:
-        """Convert the sequence to a one-hot encoded array.
-
-        Each symbol is converted to a binary vector where only one element is 1.
-        Uses the internal one-hot encoder by default,
-        but a custom encoder can be provided.
-
-        :param dtype: The numpy dtype for the output array, defaults to int
-        :param encoder: Optional custom sklearn-style encoder
-            to use instead of the default
-        :returns: A 2D numpy array containing the one-hot encoding
-        """
-        seq_as_array = [[x] for x in self]
-
-        if encoder is not None:
-            return encoder.transform(seq_as_array).squeeze().astype(dtype)
-        return self._onehot_encoder.transform(seq_as_array).squeeze().astype(dtype)
-
-    def apply(self, func, **kwargs):
-        """Apply a function to this sequence and return the result.
-
-        Enables method chaining through a fluent interface pattern.
-        The function must take a SequenceLike object as the 'seq' parameter.
-
-        :param func: The function to apply
-        :param kwargs: Keyword arguments to pass to the function
-        :returns: The result of calling func(seq=self, **kwargs)
-        """
-        return func(seq=deepcopy(self), **kwargs)
-
-    def find(self, sub, start=None, end=None) -> int:
-        """Find the first occurrence of a subsequence.
-
-        :param sub: The subsequence to search for
-        :param start: Optional start position for the search
-        :param end: Optional end position for the search
-        :returns: Index of first match, or -1 if not found
-        :raises AssertionError: If subsequence contains invalid symbols
-        """
-        assert set(sub).issubset(self.alphabet)
-
-        if start is None:
-            start = 0
-        if end is None:
-            end = len(self) - len(sub)
-
-        for i in range(start, end + 1):
-            if "".join(self[i : i + len(sub)]) == "".join(sub):
-                return i
-        return -1
-
-    def count(self, sub, start=None, end=None) -> int:
-        """Count occurrences of a subsequence.
-
-        :param sub: The subsequence to count
-        :param start: Optional start position for counting
-        :param end: Optional end position for counting
-        :returns: Number of non-overlapping occurrences
-        :raises ValueError: If subsequence contains invalid symbols
-        """
-        if not set(sub).issubset(self.alphabet):
-            raise ValueError(
-                f"Subsequence set {set(sub)} "
-                f"is not part of the alphabet {self.alphabet}"
-            )
-
-        if start is None:
-            start = 0
-        if end is None:
-            end = len(self) - len(sub)
-
-        count = 0
-        for i in range(start, end + 1):
-            if "".join(self[i : i + len(sub)]) == "".join(sub):
-                count += 1
-        return count
-
-    def __len__(self):
-        """Get length of sequence.
-
-        :returns: Length of the sequence
-        """
-        return len(self.sequence)
-
-    def __getitem__(self, index):
-        """Get item at specified index.
-
-        :param index: Integer index or slice
-        :returns: Element(s) at specified position(s)
-        """
-        return self.sequence[index]
-
-    def __contains__(self, x: object) -> bool:
-        """Check if item exists in sequence.
-
-        :param x: Item to check for
-        :returns: True if item exists in sequence, False otherwise
-        """
-        return x in self.sequence
-
-    def __iter__(self):
-        """Get iterator over sequence.
-
-        :returns: Iterator over sequence elements
-        """
-        return iter(self.sequence)
+        return len(self.sequence_data.position)
 
     def __str__(self) -> str:
-        """Convert to string representation.
+        """Get string representation of the sequence.
 
         :returns: The sequence as a string
         """
-        return self.to_str()
+        return "".join(self.sequence.values.tolist())
 
-    def __deepcopy__(self, memo):
-        """Create a deep copy of this object.
+    def __getattr__(self, name) -> Any:
+        """Attribute access delegation.
 
-        :param memo: Memo dictionary used by deepcopy
-        :returns: A new SequenceLike instance with copied data
+        We first check if the attribute exists on the underlying xarray Dataset,
+        and if so, we delegate to it. Otherwise, we check the SeqLike object.
+
+        :param name: Name of the attribute to access
+        :returns: The requested attribute
+        :raises AttributeError: If the attribute doesn't exist
         """
-        return SequenceLike(self.sequence, self.alphabet)
+        # Protect against recursion for special attributes
+        if name.startswith("_"):
+            raise AttributeError(
+                f"'{self.__class__.__name__}' has no attribute '{name}'"
+            )
 
-    def __repr__(self) -> str:
-        """Get string representation of the sequence.
+        # Only delegate to sequence_data if it exists
+        if hasattr(self, "sequence_data") and hasattr(self.sequence_data, name):
+            return getattr(self.sequence_data, name)
+        raise AttributeError(f"'{self.__class__.__name__}' has no attribute '{name}'")
 
-        :returns: String representation of the sequence
+    def __setattr__(self, name, value):
+        """Attribute setting delegation.
+
+        We first check if the attribute exists on the underlying xarray Dataset,
+        and if so, we delegate to it. Otherwise, we set it on the SeqLike object.
+
+        :param name: Name of the attribute to set
+        :param value: Value to set the attribute to
         """
-        return self.sequence.__repr__()
+        # Always allow setting protected attributes directly
+        if name.startswith("_") or name == "sequence_data":
+            super().__setattr__(name, value)
+            return
+
+        # Only delegate to sequence_data if it exists
+        if hasattr(self, "sequence_data") and hasattr(self.sequence_data, name):
+            setattr(self.sequence_data, name, value)
+        else:
+            super().__setattr__(name, value)

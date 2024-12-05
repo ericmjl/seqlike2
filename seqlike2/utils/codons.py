@@ -95,7 +95,7 @@ def create_uniform_codon_matrix() -> jnp.ndarray:
     matrix = np.zeros((len(AA), len(CODONS)))
 
     # For each amino acid, count its codons and assign uniform probabilities
-    for aa_idx, aa in enumerate(AA):
+    for aa_idx, aa in enumerate(sorted(AA)):
         # Get all codons coding for this AA
         aa_codons = [i for i, v in enumerate(CODONS) if GENETIC_CODE.get(v, "X") == aa]
         if aa_codons:  # Skip if no codons found (e.g., for special characters)
